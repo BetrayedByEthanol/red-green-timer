@@ -1,0 +1,4 @@
+avoid-breaking-exported-api = true
+msrv = "1.77"
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250

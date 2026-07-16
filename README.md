@@ -70,6 +70,17 @@ pointed at it (both configured in `tauri.conf.json` / `vite.config.ts`).
 cargo test -p timer-core
 ```
 
+## Formatting and linting
+
+```bash
+npm run format:check
+npm run lint
+```
+
+- `format:check` runs `cargo fmt --all --check` using the repository `rustfmt.toml`.
+- `lint` runs Svelte/TypeScript diagnostics with `svelte-check` and Rust lints with Clippy.
+- Shared whitespace defaults live in `.editorconfig`; Clippy thresholds live in `clippy.toml`.
+
 ## Building a release bundle
 
 ```bash

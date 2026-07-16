@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "format:check": "cargo fmt --all --check",
+    "lint:frontend": "svelte-check --tsconfig ./tsconfig.json",
+    "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings",
+    "lint": "npm run lint:frontend && npm run lint:rust"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1"
