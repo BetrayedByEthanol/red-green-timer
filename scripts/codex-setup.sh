@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
-
 log() {
   printf '\n==> %s\n' "$1"
 }
@@ -13,6 +10,27 @@ require_command() {
     printf 'Required command not found: %s\n' "$1" >&2
     exit 1
   fi
+}
+
+find_repository_root() {
+  local root
+
+  # Codex environment scripts are copied to a temporary location, so
+  # BASH_SOURCE may not point inside the checked-out repository.
+  if root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"; then
+    printf '%s\n' "$root"
+    return
+  fi
+
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  if root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null)"; then
+    printf '%s\n' "$root"
+    return
+  fi
+
+  printf 'Could not locate the checked-out Git repository.\n' >&2
+  exit 1
 }
 
 install_tauri_linux_dependencies() {
@@ -60,9 +78,24 @@ install_tauri_linux_dependencies() {
 
 log "Checking required toolchains"
 require_command cargo
+require_command git
 require_command node
 require_command npm
 require_command rustup
+
+ROOT_DIR="$(find_repository_root)"
+cd "$ROOT_DIR"
+printf 'Repository root: %s\n' "$ROOT_DIR"
+
+if [[ ! -f package-lock.json ]]; then
+  printf 'package-lock.json not found in repository root: %s\n' "$ROOT_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -f Cargo.lock ]]; then
+  printf 'Cargo.lock not found in repository root: %s\n' "$ROOT_DIR" >&2
+  exit 1
+fi
 
 install_tauri_linux_dependencies
 
