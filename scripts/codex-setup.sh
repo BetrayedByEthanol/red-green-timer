@@ -20,14 +20,16 @@ install_tauri_linux_dependencies() {
     return
   fi
 
+  # Current Tauri 2 prerequisites for Debian/Ubuntu, plus packaging tools.
   local packages=(
     build-essential
     curl
     file
-    libappindicator3-dev
+    libayatana-appindicator3-dev
     librsvg2-dev
     libssl-dev
     libwebkit2gtk-4.1-dev
+    libxdo-dev
     patchelf
     pkg-config
     wget
