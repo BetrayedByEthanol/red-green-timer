@@ -1,0 +1,15 @@
+# Rust
+/target
+crates/*/target
+
+# Node
+node_modules
+dist
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+
+# Editor / OS
+.DS_Store
+*.swp

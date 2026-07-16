@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/timer-core",
+    "src-tauri",
+]
+
+[workspace.package]
+edition = "2021"
