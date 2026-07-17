@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::TimerError;
 use crate::model::{Phase, TimerConfig};
-use crate::state::TimerState;
+use crate::state::TimerSnapshot;
 
 /// Drives a red/green interval cycle.
 ///
@@ -73,7 +73,7 @@ impl TimerEngine {
     /// Advances internal state based on wall-clock time elapsed since the
     /// last tick (or since `start`, if this is the first tick), then returns
     /// a fresh snapshot. Safe to call whether or not the timer is running.
-    pub fn tick(&mut self) -> TimerState {
+    pub fn tick(&mut self) -> TimerSnapshot {
         if self.running {
             let now = Instant::now();
             if let Some(last) = self.last_tick {
@@ -112,8 +112,8 @@ impl TimerEngine {
     }
 
     /// A point-in-time view of the engine without advancing it.
-    pub fn snapshot(&self) -> TimerState {
-        TimerState {
+    pub fn snapshot(&self) -> TimerSnapshot {
+        TimerSnapshot {
             phase: self.phase,
             remaining_seconds: self.remaining.as_secs(),
             running: self.running,

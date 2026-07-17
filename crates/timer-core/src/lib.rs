@@ -5,5 +5,8 @@ pub mod state;
 
 pub use engine::TimerEngine;
 pub use error::TimerError;
-pub use model::{Phase, TimerConfig};
-pub use state::TimerState;
+pub use model::{
+    ActivePhase, CompletedPhase, Phase, PhaseOutcome, PhaseType, TimerConfig, TimerDefinition,
+    TimerRun, TimerState, TimerValidationError,
+};
+pub use state::TimerSnapshot;

@@ -1,5 +1,5 @@
 use tauri::State;
-use timer_core::{TimerError, TimerState};
+use timer_core::{TimerError, TimerSnapshot};
 
 use crate::application::AppState;
 
@@ -12,21 +12,21 @@ fn poisoned() -> String {
 }
 
 #[tauri::command]
-pub fn start_timer(state: State<AppState>) -> Result<TimerState, String> {
+pub fn start_timer(state: State<AppState>) -> Result<TimerSnapshot, String> {
     let mut engine = state.engine.lock().map_err(|_| poisoned())?;
     engine.start().map_err(|e: TimerError| e.to_string())?;
     Ok(engine.snapshot())
 }
 
 #[tauri::command]
-pub fn pause_timer(state: State<AppState>) -> Result<TimerState, String> {
+pub fn pause_timer(state: State<AppState>) -> Result<TimerSnapshot, String> {
     let mut engine = state.engine.lock().map_err(|_| poisoned())?;
     engine.pause().map_err(|e: TimerError| e.to_string())?;
     Ok(engine.snapshot())
 }
 
 #[tauri::command]
-pub fn reset_timer(state: State<AppState>) -> Result<TimerState, String> {
+pub fn reset_timer(state: State<AppState>) -> Result<TimerSnapshot, String> {
     let mut engine = state.engine.lock().map_err(|_| poisoned())?;
     engine.reset();
     Ok(engine.snapshot())
@@ -35,7 +35,7 @@ pub fn reset_timer(state: State<AppState>) -> Result<TimerState, String> {
 /// Called on a frontend-driven interval (e.g. every second) so the engine
 /// can catch up to wall-clock time and report the latest state.
 #[tauri::command]
-pub fn tick_timer(state: State<AppState>) -> Result<TimerState, String> {
+pub fn tick_timer(state: State<AppState>) -> Result<TimerSnapshot, String> {
     let mut engine = state.engine.lock().map_err(|_| poisoned())?;
     Ok(engine.tick())
 }
