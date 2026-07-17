@@ -1,24 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { TimerState } from "./types";
+import type { CompletedRunSummary, TimerSnapshot } from "./types";
 
-/**
- * Thin typed wrappers around the Tauri commands defined in
- * `src-tauri/src/commands.rs`. Keep this file as the single place that
- * knows the IPC command names/signatures.
- */
-
-export function startTimer(): Promise<TimerState> {
-  return invoke<TimerState>("start_timer");
-}
-
-export function pauseTimer(): Promise<TimerState> {
-  return invoke<TimerState>("pause_timer");
-}
-
-export function resetTimer(): Promise<TimerState> {
-  return invoke<TimerState>("reset_timer");
-}
-
-export function tickTimer(): Promise<TimerState> {
-  return invoke<TimerState>("tick_timer");
-}
+export const startTimer = (): Promise<TimerSnapshot> => invoke("start_timer");
+export const stopGreen = (): Promise<TimerSnapshot> => invoke("stop_green");
+export const stopRun = (): Promise<CompletedRunSummary> => invoke("stop_run");
+export const tickTimer = (): Promise<TimerSnapshot> => invoke("tick_timer");
+export const getTimerSnapshot = (): Promise<TimerSnapshot> => invoke("get_timer_snapshot");

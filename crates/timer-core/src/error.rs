@@ -1,13 +1,17 @@
 use thiserror::Error;
 
+use crate::TimerValidationError;
+
 #[derive(Debug, Error)]
 pub enum TimerError {
-    #[error("timer is already running")]
-    AlreadyRunning,
-
-    #[error("timer is not running")]
-    NotRunning,
-
-    #[error("invalid configuration: {0}")]
-    InvalidConfig(String),
+    #[error("a timer run is already active")]
+    RunAlreadyActive,
+    #[error("there is no active timer run")]
+    NoActiveRun,
+    #[error("the active phase is not Green")]
+    NotInGreenPhase,
+    #[error("invalid timer transition")]
+    InvalidTransition,
+    #[error(transparent)]
+    TimerValidation(#[from] TimerValidationError),
 }

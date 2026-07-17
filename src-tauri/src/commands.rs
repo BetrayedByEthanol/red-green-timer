@@ -1,5 +1,5 @@
 use tauri::State;
-use timer_core::{TimerError, TimerSnapshot};
+use timer_core::{CompletedRunSummary, TimerError, TimerSnapshot};
 
 use crate::application::AppState;
 
@@ -14,21 +14,24 @@ fn poisoned() -> String {
 #[tauri::command]
 pub fn start_timer(state: State<AppState>) -> Result<TimerSnapshot, String> {
     let mut engine = state.engine.lock().map_err(|_| poisoned())?;
-    engine.start().map_err(|e: TimerError| e.to_string())?;
-    Ok(engine.snapshot())
+    engine.start_run().map_err(|e: TimerError| e.to_string())
 }
 
 #[tauri::command]
-pub fn pause_timer(state: State<AppState>) -> Result<TimerSnapshot, String> {
+pub fn stop_green(state: State<AppState>) -> Result<TimerSnapshot, String> {
     let mut engine = state.engine.lock().map_err(|_| poisoned())?;
-    engine.pause().map_err(|e: TimerError| e.to_string())?;
-    Ok(engine.snapshot())
+    engine.stop_green().map_err(|e: TimerError| e.to_string())
 }
 
 #[tauri::command]
-pub fn reset_timer(state: State<AppState>) -> Result<TimerSnapshot, String> {
+pub fn stop_run(state: State<AppState>) -> Result<CompletedRunSummary, String> {
     let mut engine = state.engine.lock().map_err(|_| poisoned())?;
-    engine.reset();
+    engine.stop_run().map_err(|e: TimerError| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_timer_snapshot(state: State<AppState>) -> Result<TimerSnapshot, String> {
+    let engine = state.engine.lock().map_err(|_| poisoned())?;
     Ok(engine.snapshot())
 }
 

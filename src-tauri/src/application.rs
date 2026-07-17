@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use timer_core::{TimerConfig, TimerEngine, TimerError};
+use timer_core::{TimerDefinition, TimerEngine, TimerError};
 
 /// Shared, Tauri-managed application state.
 ///
@@ -12,9 +12,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: TimerConfig) -> Result<Self, TimerError> {
+    pub fn new(definition: TimerDefinition) -> Result<Self, TimerError> {
         Ok(Self {
-            engine: Mutex::new(TimerEngine::new(config)?),
+            engine: Mutex::new(TimerEngine::new(definition)?),
         })
     }
 }
