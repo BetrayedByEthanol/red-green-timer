@@ -12,8 +12,8 @@ red-green-timer/
 │   └── src/
 │       ├── lib.rs
 │       ├── engine.rs          # TimerEngine: start/pause/reset/tick
-│       ├── model.rs           # Phase, TimerConfig
-│       ├── state.rs           # TimerState snapshot (serde)
+│       ├── model.rs           # Domain models, validation errors, TimerConfig
+│       ├── state.rs           # TimerSnapshot IPC snapshot (serde)
 │       └── error.rs           # TimerError (thiserror)
 ├── src/                       # Svelte + TS frontend (Vite)
 │   ├── App.svelte
@@ -44,7 +44,7 @@ red-green-timer/
   because elapsed time is computed from real timestamps, the state stays
   correct even if a tick is delayed or the window was backgrounded.
 - **IPC types kept in sync manually.** `src/lib/types.ts` mirrors
-  `timer_core::state::TimerState` and `Phase` by hand. If this grows, look at
+  `timer_core::state::TimerSnapshot` and `Phase` by hand. If this grows, look at
   `tauri-specta` to generate the TS types directly from the Rust structs.
 
 ## Prerequisites
