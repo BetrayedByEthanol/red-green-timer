@@ -50,6 +50,18 @@ fn summary(id: Uuid) -> CompletedRunSummary {
 }
 
 #[tokio::test]
+async fn file_database_is_created_on_first_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("first-launch.sqlite3");
+    let url = format!("sqlite:{}", db_path.display());
+
+    let r = TimerRepository::open(&url).await.unwrap();
+
+    assert!(db_path.exists());
+    assert_eq!(r.timer_count().await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn new_database_runs_migrations() {
     let r = repo().await;
     assert_eq!(r.timer_count().await.unwrap(), 0);

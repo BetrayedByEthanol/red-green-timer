@@ -7,6 +7,8 @@ pub enum PersistenceError {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     Migration(#[from] sqlx::migrate::MigrateError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("timer not found: {0}")]
     TimerNotFound(Uuid),
     #[error("timer is archived: {0}")]
