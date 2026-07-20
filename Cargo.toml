@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/timer-core",
+    "crates/timer-persistence",
     "src-tauri",
 ]
 
