@@ -24,6 +24,8 @@ pub enum ApplicationError {
     NoActiveTimer,
     #[error("a completed run is waiting to be persisted; stop_run will retry it")]
     PendingPersistenceWrite,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 struct ActiveTimer {
@@ -52,6 +54,9 @@ impl ApplicationController {
         })
     }
     pub async fn open_file(path: &Path) -> Result<Self, ApplicationError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let url = format!("sqlite:{}", path.display());
         Self::open(&url).await
     }
@@ -79,7 +84,12 @@ impl ApplicationController {
         id: Uuid,
         req: TimerRequest,
     ) -> Result<TimerDto, ApplicationError> {
-        if self.active_timer.as_ref().is_some_and(|a| a.timer_id == id) {
+        if self.active_timer.as_ref().is_some_and(|a| a.timer_id == id)
+            || self
+                .pending_write
+                .as_ref()
+                .is_some_and(|p| p.timer_id == id)
+        {
             return Err(ApplicationError::TimerIsActive(id));
         }
         let def = req.definition(id)?;
@@ -92,7 +102,12 @@ impl ApplicationController {
             .into())
     }
     pub async fn archive_timer(&self, id: Uuid) -> Result<(), ApplicationError> {
-        if self.active_timer.as_ref().is_some_and(|a| a.timer_id == id) {
+        if self.active_timer.as_ref().is_some_and(|a| a.timer_id == id)
+            || self
+                .pending_write
+                .as_ref()
+                .is_some_and(|p| p.timer_id == id)
+        {
             return Err(ApplicationError::TimerIsActive(id));
         }
         self.repository.archive_timer(id, SystemTime::now()).await?;
@@ -127,12 +142,22 @@ impl ApplicationController {
             .stop_green()?)
     }
     pub async fn stop_run(&mut self) -> Result<CompletedRunSummaryDto, ApplicationError> {
-        if let Some(p) = &self.pending_write {
-            self.repository
-                .insert_completed_run(p.timer_id, &p.summary, RunEndReason::UserStop)
-                .await?;
-            let summary = self.pending_write.take().expect("pending exists").summary;
-            return Ok(summary.into());
+        if self.pending_write.is_some() {
+            let pending = self
+                .pending_write
+                .take()
+                .ok_or(ApplicationError::PendingPersistenceWrite)?;
+            match self
+                .repository
+                .insert_completed_run(pending.timer_id, &pending.summary, RunEndReason::UserStop)
+                .await
+            {
+                Ok(()) => return Ok(pending.summary.into()),
+                Err(e) => {
+                    self.pending_write = Some(pending);
+                    return Err(e.into());
+                }
+            }
         }
         let active = self
             .active_timer
@@ -340,5 +365,56 @@ mod tests {
         a.start_timer(t.id).await.unwrap();
         a.stop_run().await.unwrap();
         assert_eq!(a.list_recent_runs(None, Some(20)).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_file_creates_first_launch_parent_directories() {
+        let db_path = std::env::temp_dir()
+            .join(format!("red-green-timer-{}", Uuid::new_v4()))
+            .join("nested")
+            .join("app.sqlite3");
+        let app = ApplicationController::open_file(&db_path).await.unwrap();
+
+        assert!(db_path.exists());
+        assert_eq!(app.list_timers().await.unwrap().len(), 1);
+        std::fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_write_blocks_timer_mutation_until_recovered() {
+        let mut a = app().await;
+        let t = a.list_timers().await.unwrap()[0].clone();
+        a.start_timer(t.id).await.unwrap();
+        let summary = a.active_timer.as_mut().unwrap().engine.stop_run().unwrap();
+        a.active_timer = None;
+        a.pending_write = Some(PendingWrite {
+            timer_id: t.id,
+            summary,
+        });
+
+        let req = TimerRequest {
+            name: "mutated".into(),
+            green_duration_seconds: 1,
+            red_duration_seconds: 1,
+        };
+        assert!(matches!(
+            a.update_timer(t.id, req).await,
+            Err(ApplicationError::TimerIsActive(_))
+        ));
+        assert!(matches!(
+            a.archive_timer(t.id).await,
+            Err(ApplicationError::TimerIsActive(_))
+        ));
+
+        a.stop_run().await.unwrap();
+
+        assert!(a.pending_write.is_none());
+        assert_eq!(
+            a.list_recent_runs(Some(t.id), Some(20))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
