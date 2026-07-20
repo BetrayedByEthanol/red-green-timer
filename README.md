@@ -11,8 +11,8 @@ red-green-timer/
 ├── crates/timer-core/         # Pure Rust domain logic, no Tauri dependency
 │   └── src/
 │       ├── lib.rs
-│       ├── engine.rs          # TimerEngine: start/pause/reset/tick
-│       ├── model.rs           # Domain models, validation errors, TimerConfig
+│       ├── engine.rs          # Deadline-driven TimerEngine run state machine
+│       ├── model.rs           # Run/phase domain models and validation
 │       ├── state.rs           # TimerSnapshot IPC snapshot (serde)
 │       └── error.rs           # TimerError (thiserror)
 ├── src/                       # Svelte + TS frontend (Vite)
@@ -38,11 +38,18 @@ red-green-timer/
 - **`timer-core` has zero Tauri dependency.** It's a plain Rust library so
   the timer logic is independently testable (see `engine.rs`'s `#[cfg(test)]`
   module) and could be reused from a CLI or a different frontend later.
-- **Wall-clock driven, not thread driven.** `TimerEngine::tick()` measures
+- **Deadline-driven, not thread driven.** `TimerEngine::tick()` measures
   elapsed time against `Instant`s rather than running its own background
   thread/timer. The frontend polls `tick_timer` on a 1s `setInterval`, and
   because elapsed time is computed from real timestamps, the state stays
   correct even if a tick is delayed or the window was backgrounded.
+- **Sprint 1 run flow.** Start Run begins Green cycle 1. Stop Green records an
+  early Green completion and immediately starts mandatory Red. Green expiry
+  records `Expired`; Red expiry records `Completed` and starts the next
+  one-based Green cycle. Stop Run records the active phase as `Interrupted`.
+  Only one run can be active at a time.
+- **Current scope.** History is in memory only. Persistence, adaptation,
+  notifications, and dropped cycles are intentionally not implemented yet.
 - **IPC types kept in sync manually.** `src/lib/types.ts` mirrors
   `timer_core::state::TimerSnapshot` and `Phase` by hand. If this grows, look at
   `tauri-specta` to generate the TS types directly from the Rust structs.

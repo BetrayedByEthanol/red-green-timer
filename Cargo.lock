@@ -2302,6 +2302,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "timer-core",
+ "uuid",
 ]
 
 [[package]]

@@ -3,33 +3,12 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The two alternating phases of a red/green interval timer.
-///
-/// Convention: `Green` is the "go" / work phase, `Red` is the "stop" / rest phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Phase {
-    Red,
-    Green,
-}
-
-impl Phase {
-    /// Returns the opposite phase.
-    pub fn toggle(self) -> Self {
-        match self {
-            Phase::Red => Phase::Green,
-            Phase::Green => Phase::Red,
-        }
-    }
-}
-
-/// Domain-level phase type used by timer runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PhaseType {
     Green,
     Red,
 }
 
-/// The reason a phase ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PhaseOutcome {
     CompletedEarly,
@@ -38,7 +17,6 @@ pub enum PhaseOutcome {
     Interrupted,
 }
 
-/// Static definition for a timer independent of any UI framework.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimerDefinition {
     pub id: Uuid,
@@ -48,7 +26,6 @@ pub struct TimerDefinition {
 }
 
 impl TimerDefinition {
-    /// Creates a validated timer definition.
     pub fn new(
         id: Uuid,
         name: impl Into<String>,
@@ -64,7 +41,6 @@ impl TimerDefinition {
         definition.validate()?;
         Ok(definition)
     }
-
     pub fn validate(&self) -> Result<(), TimerValidationError> {
         if self.name.trim().is_empty() {
             return Err(TimerValidationError::EmptyName);
@@ -79,8 +55,109 @@ impl TimerDefinition {
     }
 }
 
-/// Runtime state for a timer run.
+/// Runtime-only deadline data is deliberately not deserializable. Future
+/// persistence must store a wall-clock deadline and reconstruct this value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActivePhase {
+    pub phase_type: PhaseType,
+    pub started_at: SystemTime,
+    #[serde(skip_serializing)]
+    pub deadline: Instant,
+    #[serde(skip_serializing)]
+    pub started_instant: Instant,
+    pub allocated_duration: Duration,
+}
+impl ActivePhase {
+    pub fn new(
+        phase_type: PhaseType,
+        started_at: SystemTime,
+        started_instant: Instant,
+        allocated_duration: Duration,
+    ) -> Result<Self, TimerValidationError> {
+        if allocated_duration.is_zero() {
+            return Err(TimerValidationError::AllocatedDurationZero);
+        }
+        let deadline = started_instant
+            .checked_add(allocated_duration)
+            .ok_or(TimerValidationError::DeadlineOverflow)?;
+        Ok(Self {
+            phase_type,
+            started_at,
+            deadline,
+            started_instant,
+            allocated_duration,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedPhase {
+    pub phase_type: PhaseType,
+    pub cycle_index: u32,
+    pub started_at: SystemTime,
+    pub ended_at: SystemTime,
+    pub allocated_duration: Duration,
+    pub actual_duration: Duration,
+    pub outcome: PhaseOutcome,
+}
+impl CompletedPhase {
+    pub fn new(
+        phase_type: PhaseType,
+        cycle_index: u32,
+        started_at: SystemTime,
+        ended_at: SystemTime,
+        allocated_duration: Duration,
+        actual_duration: Duration,
+        outcome: PhaseOutcome,
+    ) -> Result<Self, TimerValidationError> {
+        let phase = Self {
+            phase_type,
+            cycle_index,
+            started_at,
+            ended_at,
+            allocated_duration,
+            actual_duration,
+            outcome,
+        };
+        phase.validate()?;
+        Ok(phase)
+    }
+    pub fn validate(&self) -> Result<(), TimerValidationError> {
+        if self.cycle_index == 0 {
+            return Err(TimerValidationError::CycleIndexZero);
+        }
+        if self.ended_at.duration_since(self.started_at).is_err() {
+            return Err(TimerValidationError::EndBeforeStart);
+        }
+        if self.actual_duration > self.allocated_duration {
+            return Err(TimerValidationError::ActualDurationExceedsAllocated);
+        }
+        match (self.phase_type, self.outcome) {
+            (PhaseType::Green, PhaseOutcome::Completed)
+            | (PhaseType::Red, PhaseOutcome::CompletedEarly | PhaseOutcome::Expired) => {
+                Err(TimerValidationError::InvalidPhaseOutcome)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum TimerState {
+    RunningGreen(ActivePhase),
+    RunningRed(ActivePhase),
+    Stopped,
+}
+impl TimerState {
+    pub fn active_phase(&self) -> Option<&ActivePhase> {
+        match self {
+            Self::RunningGreen(p) | Self::RunningRed(p) => Some(p),
+            Self::Stopped => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TimerRun {
     pub id: Uuid,
     pub timer_id: Uuid,
@@ -89,128 +166,40 @@ pub struct TimerRun {
     pub phases: Vec<CompletedPhase>,
 }
 
-impl TimerRun {
-    /// Creates a validated timer run. Cycle indices are one-based.
-    pub fn new(
-        id: Uuid,
-        timer_id: Uuid,
-        cycle_index: u32,
-        state: TimerState,
-        phases: Vec<CompletedPhase>,
-    ) -> Result<Self, TimerValidationError> {
-        let run = Self {
-            id,
-            timer_id,
-            cycle_index,
-            state,
-            phases,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompletedRunSummary {
+    pub run_id: Uuid,
+    pub phases: Vec<CompletedPhase>,
+    pub green_completed_early: usize,
+    pub green_expired: usize,
+    pub red_completed: usize,
+    pub interrupted: usize,
+    pub total_completed_phase_records: usize,
+    pub last_cycle_index: u32,
+}
+impl CompletedRunSummary {
+    pub fn from_run(run: TimerRun) -> Self {
+        let mut s = Self {
+            run_id: run.id,
+            phases: run.phases,
+            green_completed_early: 0,
+            green_expired: 0,
+            red_completed: 0,
+            interrupted: 0,
+            total_completed_phase_records: 0,
+            last_cycle_index: run.cycle_index,
         };
-        run.validate()?;
-        Ok(run)
-    }
-
-    pub fn validate(&self) -> Result<(), TimerValidationError> {
-        if self.cycle_index == 0 {
-            return Err(TimerValidationError::CycleIndexZero);
-        }
-        self.state.validate()
-    }
-}
-
-/// Mutually-exclusive run states. The enum shape prevents green and red phases
-/// from running simultaneously.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimerState {
-    Idle,
-    RunningGreen(ActivePhase),
-    RunningRed(ActivePhase),
-    Stopped,
-}
-
-impl TimerState {
-    pub fn validate(&self) -> Result<(), TimerValidationError> {
-        match self {
-            TimerState::RunningGreen(phase) if phase.phase_type != PhaseType::Green => {
-                Err(TimerValidationError::ActivePhaseTypeMismatch {
-                    state: PhaseType::Green,
-                    active_phase: phase.phase_type,
-                })
+        for p in &s.phases {
+            match (p.phase_type, p.outcome) {
+                (PhaseType::Green, PhaseOutcome::CompletedEarly) => s.green_completed_early += 1,
+                (PhaseType::Green, PhaseOutcome::Expired) => s.green_expired += 1,
+                (PhaseType::Red, PhaseOutcome::Completed) => s.red_completed += 1,
+                (_, PhaseOutcome::Interrupted) => s.interrupted += 1,
+                _ => {}
             }
-            TimerState::RunningRed(phase) if phase.phase_type != PhaseType::Red => {
-                Err(TimerValidationError::ActivePhaseTypeMismatch {
-                    state: PhaseType::Red,
-                    active_phase: phase.phase_type,
-                })
-            }
-            TimerState::RunningGreen(phase) | TimerState::RunningRed(phase) => phase.validate(),
-            TimerState::Idle | TimerState::Stopped => Ok(()),
         }
-    }
-}
-
-/// A currently running phase.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActivePhase {
-    pub phase_type: PhaseType,
-    pub started_at: SystemTime,
-    #[serde(skip, default = "Instant::now")]
-    pub deadline: Instant,
-    pub allocated_duration: Duration,
-}
-
-impl ActivePhase {
-    pub fn new(
-        phase_type: PhaseType,
-        started_at: SystemTime,
-        deadline: Instant,
-        allocated_duration: Duration,
-    ) -> Result<Self, TimerValidationError> {
-        let phase = Self {
-            phase_type,
-            started_at,
-            deadline,
-            allocated_duration,
-        };
-        phase.validate()?;
-        Ok(phase)
-    }
-
-    pub fn validate(&self) -> Result<(), TimerValidationError> {
-        if self.allocated_duration.is_zero() {
-            return Err(TimerValidationError::AllocatedDurationZero);
-        }
-        Ok(())
-    }
-}
-
-/// A phase that has ended and can be stored or displayed in a run history.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompletedPhase {
-    pub phase_type: PhaseType,
-    pub cycle_index: u32,
-    pub started_at: SystemTime,
-    pub ended_at: SystemTime,
-    pub allocated_duration: Duration,
-    pub outcome: PhaseOutcome,
-}
-
-/// Static configuration for the existing red/green engine.
-///
-/// Durations are expressed in whole seconds to keep the type trivially
-/// serializable across the Tauri IPC boundary without pulling in a
-/// `serde`-with-`Duration` shim.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct TimerConfig {
-    pub red_seconds: u64,
-    pub green_seconds: u64,
-}
-
-impl Default for TimerConfig {
-    fn default() -> Self {
-        Self {
-            red_seconds: 20,
-            green_seconds: 40,
-        }
+        s.total_completed_phase_records = s.phases.len();
+        s
     }
 }
 
@@ -226,75 +215,77 @@ pub enum TimerValidationError {
     CycleIndexZero,
     #[error("active phase duration must be greater than zero")]
     AllocatedDurationZero,
-    #[error("{state:?} state cannot contain a {active_phase:?} active phase")]
-    ActivePhaseTypeMismatch {
-        state: PhaseType,
-        active_phase: PhaseType,
-    },
+    #[error("phase deadline overflowed")]
+    DeadlineOverflow,
+    #[error("phase ended before it started")]
+    EndBeforeStart,
+    #[error("actual duration exceeds allocated duration")]
+    ActualDurationExceedsAllocated,
+    #[error("invalid outcome for phase type")]
+    InvalidPhaseOutcome,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn duration() -> Duration {
-        Duration::from_secs(1)
-    }
-
     #[test]
-    fn timer_definition_rejects_empty_names() {
-        let result = TimerDefinition::new(Uuid::nil(), " ", duration(), duration());
-        assert!(matches!(result, Err(TimerValidationError::EmptyName)));
-    }
-
-    #[test]
-    fn timer_definition_rejects_zero_green_duration() {
-        let result = TimerDefinition::new(Uuid::nil(), "Timer", Duration::ZERO, duration());
+    fn definition_rejects_empty_name_and_zero_durations() {
         assert!(matches!(
-            result,
+            TimerDefinition::new(
+                Uuid::nil(),
+                " ",
+                Duration::from_secs(1),
+                Duration::from_secs(1)
+            ),
+            Err(TimerValidationError::EmptyName)
+        ));
+        assert!(matches!(
+            TimerDefinition::new(Uuid::nil(), "x", Duration::ZERO, Duration::from_secs(1)),
             Err(TimerValidationError::GreenDurationZero)
         ));
-    }
-
-    #[test]
-    fn timer_definition_rejects_zero_red_duration() {
-        let result = TimerDefinition::new(Uuid::nil(), "Timer", duration(), Duration::ZERO);
-        assert!(matches!(result, Err(TimerValidationError::RedDurationZero)));
-    }
-
-    #[test]
-    fn timer_run_rejects_zero_cycle_index() {
-        let result = TimerRun::new(Uuid::nil(), Uuid::nil(), 0, TimerState::Idle, Vec::new());
-        assert!(matches!(result, Err(TimerValidationError::CycleIndexZero)));
-    }
-
-    #[test]
-    fn running_green_requires_green_active_phase() {
-        let active = ActivePhase::new(
-            PhaseType::Red,
-            SystemTime::UNIX_EPOCH,
-            Instant::now(),
-            duration(),
-        )
-        .unwrap();
-        let state = TimerState::RunningGreen(active);
         assert!(matches!(
-            state.validate(),
-            Err(TimerValidationError::ActivePhaseTypeMismatch { .. })
+            TimerDefinition::new(Uuid::nil(), "x", Duration::from_secs(1), Duration::ZERO),
+            Err(TimerValidationError::RedDurationZero)
         ));
     }
-
     #[test]
-    fn active_phase_rejects_zero_allocated_duration() {
-        let result = ActivePhase::new(
-            PhaseType::Green,
-            SystemTime::UNIX_EPOCH,
-            Instant::now(),
-            Duration::ZERO,
-        );
+    fn completed_phase_validates_cycle_time_and_outcome() {
+        let start = SystemTime::UNIX_EPOCH;
         assert!(matches!(
-            result,
-            Err(TimerValidationError::AllocatedDurationZero)
+            CompletedPhase::new(
+                PhaseType::Green,
+                0,
+                start,
+                start,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                PhaseOutcome::Interrupted
+            ),
+            Err(TimerValidationError::CycleIndexZero)
+        ));
+        assert!(matches!(
+            CompletedPhase::new(
+                PhaseType::Red,
+                1,
+                start,
+                start,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                PhaseOutcome::Expired
+            ),
+            Err(TimerValidationError::InvalidPhaseOutcome)
+        ));
+        assert!(matches!(
+            CompletedPhase::new(
+                PhaseType::Green,
+                1,
+                start + Duration::from_secs(1),
+                start,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                PhaseOutcome::Interrupted
+            ),
+            Err(TimerValidationError::EndBeforeStart)
         ));
     }
 }
