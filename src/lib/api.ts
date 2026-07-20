@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CompletedRunSummary, TimerSnapshot } from "./types";
-
-export const startTimer = (): Promise<TimerSnapshot> => invoke("start_timer");
+import type { CompletedRunSummary, RunHistorySummary, TimerDefinitionDto, TimerRequest, TimerSnapshot } from "./types";
+export const listTimers = (): Promise<TimerDefinitionDto[]> => invoke("list_timers");
+export const createTimer = (request: TimerRequest): Promise<TimerDefinitionDto> => invoke("create_timer", { request });
+export const updateTimer = (timer_id: string, request: TimerRequest): Promise<TimerDefinitionDto> => invoke("update_timer", { timerId: timer_id, request });
+export const archiveTimer = (timer_id: string): Promise<void> => invoke("archive_timer", { timerId: timer_id });
+export const startTimer = (timer_id: string): Promise<TimerSnapshot> => invoke("start_timer", { timerId: timer_id });
 export const stopGreen = (): Promise<TimerSnapshot> => invoke("stop_green");
 export const stopRun = (): Promise<CompletedRunSummary> => invoke("stop_run");
 export const tickTimer = (): Promise<TimerSnapshot> => invoke("tick_timer");
 export const getTimerSnapshot = (): Promise<TimerSnapshot> => invoke("get_timer_snapshot");
+export const listRecentRuns = (timer_id?: string, limit = 20): Promise<RunHistorySummary[]> => invoke("list_recent_runs", { timerId: timer_id ?? null, limit });
