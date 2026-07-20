@@ -43,11 +43,24 @@ red-green-timer/
   thread/timer. The frontend polls `tick_timer` on a 1s `setInterval`, and
   because elapsed time is computed from real timestamps, the state stays
   correct even if a tick is delayed or the window was backgrounded.
+- **Exact-deadline semantics.** A phase is due when `now >= deadline`; at the
+  exact deadline Green is expired and Red is completed. Before any user action,
+  the engine first catches up every overdue deadline transition. Stop Green can
+  therefore record `CompletedEarly` only while `now < deadline`; once the Green
+  deadline is reached it processes the expiry and returns `NotInGreenPhase`
+  because Red is active. Stop Run likewise catches up overdue Green/Red
+  transitions first, then records only the phase active after catch-up as
+  `Interrupted`.
+- **Authoritative timestamps.** Sprint 1 runtime duration is derived from the
+  injected monotonic clock. Automatic deadline transitions use the scheduled
+  full allocated duration; manual early completion and interruption use elapsed
+  monotonic duration and derive `ended_at` from `started_at + actual_duration`
+  so persisted-compatible records remain internally consistent.
 - **Sprint 1 run flow.** Start Run begins Green cycle 1. Stop Green records an
   early Green completion and immediately starts mandatory Red. Green expiry
   records `Expired`; Red expiry records `Completed` and starts the next
-  one-based Green cycle. Stop Run records the active phase as `Interrupted`.
-  Only one run can be active at a time.
+  one-based Green cycle. Stop Run records the active phase after deadline
+  catch-up as `Interrupted`. Only one run can be active at a time.
 - **Current scope.** History is in memory only. Persistence, adaptation,
   notifications, and dropped cycles are intentionally not implemented yet.
 - **IPC types kept in sync manually.** `src/lib/types.ts` mirrors
@@ -77,7 +90,10 @@ pointed at it (both configured in `tauri.conf.json` / `vite.config.ts`).
 cargo test -p timer-core
 ```
 
-## Formatting and linting
+The core timing tests use an injected fake clock rather than real sleeps, so
+exact deadlines, delayed polling, and action-before-poll races are deterministic.
+
+## Formatting, linting, and CI
 
 ```bash
 npm run format:check
@@ -87,6 +103,10 @@ npm run lint
 - `format:check` runs `cargo fmt --all --check` using the repository `rustfmt.toml`.
 - `lint` runs Svelte/TypeScript diagnostics with `svelte-check` and Rust lints with Clippy.
 - Shared whitespace defaults live in `.editorconfig`; Clippy thresholds live in `clippy.toml`.
+- GitHub Actions CI runs on pushes to `master` and on pull requests. It runs
+  Rust formatting, Clippy, workspace tests, frontend checks, and the frontend
+  build. Full Tauri bundle builds remain a local verification step because
+  Linux native dependencies vary by environment.
 
 ## Building a release bundle
 

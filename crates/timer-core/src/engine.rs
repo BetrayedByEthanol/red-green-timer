@@ -59,62 +59,37 @@ impl<C: Clock> TimerEngine<C> {
         Ok(self.snapshot())
     }
     pub fn stop_green(&mut self) -> Result<TimerSnapshot, TimerError> {
-        let active = self.take_active(PhaseType::Green)?;
-        self.complete(active, PhaseOutcome::CompletedEarly)?;
-        self.start_phase(
+        // Exact-deadline semantics are `now >= deadline`: overdue transitions
+        // are caught up before user actions, so Green cannot be completed early
+        // at or after its scheduled deadline.
+        self.process_due_transitions()?;
+        let active = self.require_active(PhaseType::Green)?.clone();
+        let completed = self.completed_phase(&active, PhaseOutcome::CompletedEarly)?;
+        let next_active = self.new_active(
             PhaseType::Red,
             self.clock.now_instant(),
-            self.clock.now_system(),
+            active.started_at + completed.actual_duration,
         )?;
+        let run = self.active_run.as_mut().ok_or(TimerError::NoActiveRun)?;
+        run.phases.push(completed);
+        run.state = TimerState::RunningRed(next_active);
         Ok(self.snapshot())
     }
     pub fn stop_run(&mut self) -> Result<CompletedRunSummary, TimerError> {
-        let active = self.take_any_active()?;
-        self.complete(active, PhaseOutcome::Interrupted)?;
-        let run = self.active_run.take().ok_or(TimerError::NoActiveRun)?;
+        // Stop catches up overdue deadlines first. The active phase after that
+        // catch-up is interrupted, so expired Green phases are never rewritten
+        // as interruptions by a delayed frontend action.
+        self.process_due_transitions()?;
+        let active = self.require_any_active()?.clone();
+        let completed = self.completed_phase(&active, PhaseOutcome::Interrupted)?;
+        let mut run = self.active_run.take().ok_or(TimerError::NoActiveRun)?;
+        run.phases.push(completed);
+        run.state = TimerState::Stopped;
         Ok(CompletedRunSummary::from_run(run))
     }
-    pub fn tick(&mut self) -> TimerSnapshot {
-        let now = self.clock.now_instant();
-        loop {
-            let due = self
-                .active_run
-                .as_ref()
-                .and_then(|r| r.state.active_phase())
-                .is_some_and(|p| now >= p.deadline);
-            if !due {
-                break;
-            }
-            let result = (|| -> Result<(), TimerError> {
-                let phase = self.take_any_active()?;
-                let next_start = phase.deadline;
-                let next_wall = phase
-                    .started_at
-                    .checked_add(phase.allocated_duration)
-                    .unwrap_or(phase.started_at);
-                let ty = phase.phase_type;
-                self.complete(
-                    phase,
-                    if ty == PhaseType::Green {
-                        PhaseOutcome::Expired
-                    } else {
-                        PhaseOutcome::Completed
-                    },
-                )?;
-                if ty == PhaseType::Green {
-                    self.start_phase(PhaseType::Red, next_start, next_wall)?;
-                } else {
-                    let run = self.active_run.as_mut().ok_or(TimerError::NoActiveRun)?;
-                    run.cycle_index = run.cycle_index.saturating_add(1);
-                    self.start_phase(PhaseType::Green, next_start, next_wall)?;
-                }
-                Ok(())
-            })();
-            if result.is_err() {
-                break;
-            }
-        }
-        self.snapshot()
+    pub fn tick(&mut self) -> Result<TimerSnapshot, TimerError> {
+        self.process_due_transitions()?;
+        Ok(self.snapshot())
     }
     pub fn snapshot(&self) -> TimerSnapshot {
         let (active, phase, cycle_index, remaining_seconds, run_id, count) =
@@ -166,42 +141,24 @@ impl<C: Clock> TimerEngine<C> {
         )
         .map_err(Into::into)
     }
-    fn start_phase(
-        &mut self,
-        ty: PhaseType,
-        instant: Instant,
-        wall: SystemTime,
-    ) -> Result<(), TimerError> {
-        let active = self.new_active(ty, instant, wall)?;
-        let run = self.active_run.as_mut().ok_or(TimerError::NoActiveRun)?;
-        run.state = match ty {
-            PhaseType::Green => TimerState::RunningGreen(active),
-            PhaseType::Red => TimerState::RunningRed(active),
-        };
-        Ok(())
-    }
-    fn take_any_active(&mut self) -> Result<ActivePhase, TimerError> {
-        let run = self.active_run.as_mut().ok_or(TimerError::NoActiveRun)?;
-        let state = std::mem::replace(&mut run.state, TimerState::Stopped);
-        match state {
-            TimerState::RunningGreen(p) | TimerState::RunningRed(p) => Ok(p),
-            TimerState::Stopped => Err(TimerError::InvalidTransition),
-        }
-    }
-    fn take_active(&mut self, required: PhaseType) -> Result<ActivePhase, TimerError> {
-        let active_type = self
-            .active_run
+    fn require_any_active(&self) -> Result<&ActivePhase, TimerError> {
+        self.active_run
             .as_ref()
             .and_then(|run| run.state.active_phase())
-            .map(|phase| phase.phase_type)
-            .ok_or(TimerError::NoActiveRun)?;
-        if active_type != required {
+            .ok_or(TimerError::NoActiveRun)
+    }
+    fn require_active(&self, required: PhaseType) -> Result<&ActivePhase, TimerError> {
+        let active = self.require_any_active()?;
+        if active.phase_type != required {
             return Err(TimerError::NotInGreenPhase);
         }
-        let active = self.take_any_active()?;
         Ok(active)
     }
-    fn complete(&mut self, active: ActivePhase, outcome: PhaseOutcome) -> Result<(), TimerError> {
+    fn completed_phase(
+        &self,
+        active: &ActivePhase,
+        outcome: PhaseOutcome,
+    ) -> Result<CompletedPhase, TimerError> {
         let now = self.clock.now_instant();
         let actual = if outcome == PhaseOutcome::Expired || outcome == PhaseOutcome::Completed {
             active.allocated_duration
@@ -218,7 +175,7 @@ impl<C: Clock> TimerEngine<C> {
             .as_ref()
             .ok_or(TimerError::NoActiveRun)?
             .cycle_index;
-        let completed = CompletedPhase::new(
+        Ok(CompletedPhase::new(
             active.phase_type,
             cycle,
             active.started_at,
@@ -226,13 +183,45 @@ impl<C: Clock> TimerEngine<C> {
             active.allocated_duration,
             actual,
             outcome,
-        )?;
-        self.active_run
-            .as_mut()
-            .ok_or(TimerError::NoActiveRun)?
-            .phases
-            .push(completed);
-        Ok(())
+        )?)
+    }
+
+    fn process_due_transitions(&mut self) -> Result<(), TimerError> {
+        loop {
+            let active = match self
+                .active_run
+                .as_ref()
+                .and_then(|run| run.state.active_phase())
+            {
+                Some(active) if self.clock.now_instant() >= active.deadline => active.clone(),
+                _ => return Ok(()),
+            };
+            let next_start = active.deadline;
+            let next_wall = active.started_at + active.allocated_duration;
+            let cycle_increment = active.phase_type == PhaseType::Red;
+            let outcome = if active.phase_type == PhaseType::Green {
+                PhaseOutcome::Expired
+            } else {
+                PhaseOutcome::Completed
+            };
+            let completed = self.completed_phase(&active, outcome)?;
+            let next_type = if active.phase_type == PhaseType::Green {
+                PhaseType::Red
+            } else {
+                PhaseType::Green
+            };
+            let next_active = self.new_active(next_type, next_start, next_wall)?;
+
+            let run = self.active_run.as_mut().ok_or(TimerError::NoActiveRun)?;
+            run.phases.push(completed);
+            if cycle_increment {
+                run.cycle_index = run.cycle_index.saturating_add(1);
+            }
+            run.state = match next_type {
+                PhaseType::Green => TimerState::RunningGreen(next_active),
+                PhaseType::Red => TimerState::RunningRed(next_active),
+            };
+        }
     }
 }
 fn ceil_seconds(d: Duration) -> u64 {
@@ -280,6 +269,192 @@ mod tests {
         )
         .unwrap()
     }
+    fn outcomes(e: &TimerEngine<&FakeClock>) -> Vec<(PhaseType, PhaseOutcome, u32)> {
+        e.active_run
+            .as_ref()
+            .unwrap()
+            .phases
+            .iter()
+            .map(|p| (p.phase_type, p.outcome, p.cycle_index))
+            .collect()
+    }
+
+    #[test]
+    fn stop_green_before_deadline_records_completed_early() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(4));
+        let s = e.stop_green().unwrap();
+        assert_eq!(s.phase, Some(PhaseType::Red));
+        assert_eq!(
+            outcomes(&e),
+            vec![(PhaseType::Green, PhaseOutcome::CompletedEarly, 1)]
+        );
+    }
+
+    #[test]
+    fn stop_green_exactly_at_deadline_records_expired() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(5));
+        assert!(matches!(e.stop_green(), Err(TimerError::NotInGreenPhase)));
+        assert_eq!(e.snapshot().phase, Some(PhaseType::Red));
+        assert_eq!(
+            outcomes(&e),
+            vec![(PhaseType::Green, PhaseOutcome::Expired, 1)]
+        );
+    }
+
+    #[test]
+    fn stop_green_after_deadline_before_tick_records_expired() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(6));
+        assert!(matches!(e.stop_green(), Err(TimerError::NotInGreenPhase)));
+        assert_eq!(e.snapshot().phase, Some(PhaseType::Red));
+        assert_eq!(
+            outcomes(&e),
+            vec![(PhaseType::Green, PhaseOutcome::Expired, 1)]
+        );
+    }
+
+    #[test]
+    fn stop_green_after_expiry_returns_not_in_green_phase() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(5));
+        e.tick().unwrap();
+        assert!(matches!(e.stop_green(), Err(TimerError::NotInGreenPhase)));
+    }
+
+    #[test]
+    fn stop_run_before_green_deadline_interrupts_green() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(4));
+        let summary = e.stop_run().unwrap();
+        assert_eq!(
+            summary
+                .phases
+                .iter()
+                .map(|p| (p.phase_type, p.outcome, p.cycle_index))
+                .collect::<Vec<_>>(),
+            vec![(PhaseType::Green, PhaseOutcome::Interrupted, 1)]
+        );
+    }
+
+    #[test]
+    fn stop_run_exactly_at_green_deadline_records_green_expired_then_interrupts_red() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(5));
+        let summary = e.stop_run().unwrap();
+        assert_eq!(
+            summary
+                .phases
+                .iter()
+                .map(|p| (p.phase_type, p.outcome, p.cycle_index))
+                .collect::<Vec<_>>(),
+            vec![
+                (PhaseType::Green, PhaseOutcome::Expired, 1),
+                (PhaseType::Red, PhaseOutcome::Interrupted, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_run_after_green_and_red_deadlines_catches_up_then_interrupts_next_green() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(9));
+        let summary = e.stop_run().unwrap();
+        assert_eq!(
+            summary
+                .phases
+                .iter()
+                .map(|p| (p.phase_type, p.outcome, p.cycle_index))
+                .collect::<Vec<_>>(),
+            vec![
+                (PhaseType::Green, PhaseOutcome::Expired, 1),
+                (PhaseType::Red, PhaseOutcome::Completed, 1),
+                (PhaseType::Green, PhaseOutcome::Interrupted, 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_run_during_red_interrupts_red() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(2));
+        e.stop_green().unwrap();
+        c.advance(Duration::from_secs(1));
+        let summary = e.stop_run().unwrap();
+        assert_eq!(
+            summary
+                .phases
+                .iter()
+                .map(|p| (p.phase_type, p.outcome, p.cycle_index))
+                .collect::<Vec<_>>(),
+            vec![
+                (PhaseType::Green, PhaseOutcome::CompletedEarly, 1),
+                (PhaseType::Red, PhaseOutcome::Interrupted, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn tick_exactly_at_green_deadline_transitions_to_red() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(5));
+        assert_eq!(e.tick().unwrap().phase, Some(PhaseType::Red));
+    }
+
+    #[test]
+    fn tick_exactly_at_red_deadline_transitions_to_next_green() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(8));
+        let s = e.tick().unwrap();
+        assert_eq!(s.phase, Some(PhaseType::Green));
+        assert_eq!(s.cycle_index, Some(2));
+    }
+
+    #[test]
+    fn delayed_tick_crosses_multiple_complete_cycles() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(14));
+        let s = e.tick().unwrap();
+        assert_eq!(s.phase, Some(PhaseType::Red));
+        assert_eq!(s.cycle_index, Some(2));
+        assert_eq!(s.remaining_seconds, 2);
+        assert_eq!(e.active_run.as_ref().unwrap().phases.len(), 3);
+    }
+
+    #[test]
+    fn failed_stop_green_after_deadline_leaves_valid_red_state() {
+        let c = FakeClock::new();
+        let mut e = engine(&c);
+        e.start_run().unwrap();
+        c.advance(Duration::from_secs(5));
+        assert!(e.stop_green().is_err());
+        assert_eq!(e.snapshot().phase, Some(PhaseType::Red));
+        assert_eq!(e.active_run.as_ref().unwrap().phases.len(), 1);
+    }
+
     #[test]
     fn starts_green_cycle_one_and_rejects_second_run() {
         let c = FakeClock::new();
@@ -309,11 +484,11 @@ mod tests {
         let mut e = engine(&c);
         e.start_run().unwrap();
         c.advance(Duration::from_secs(8));
-        let s = e.tick();
+        let s = e.tick().unwrap();
         assert_eq!(s.phase, Some(PhaseType::Green));
         assert_eq!(s.cycle_index, Some(2));
         assert_eq!(e.active_run.as_ref().unwrap().phases.len(), 2);
-        e.tick();
+        e.tick().unwrap();
         assert_eq!(e.active_run.as_ref().unwrap().phases.len(), 2);
     }
     #[test]
@@ -322,7 +497,7 @@ mod tests {
         let mut e = engine(&c);
         e.start_run().unwrap();
         c.advance(Duration::from_secs(4));
-        assert_eq!(e.tick().remaining_seconds, 1);
+        assert_eq!(e.tick().unwrap().remaining_seconds, 1);
         assert_eq!(e.active_run.as_ref().unwrap().phases.len(), 0);
     }
     #[test]

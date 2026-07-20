@@ -126,18 +126,49 @@ impl CompletedPhase {
         if self.cycle_index == 0 {
             return Err(TimerValidationError::CycleIndexZero);
         }
-        if self.ended_at.duration_since(self.started_at).is_err() {
-            return Err(TimerValidationError::EndBeforeStart);
+        if self.allocated_duration.is_zero() {
+            return Err(TimerValidationError::AllocatedDurationZero);
+        }
+        let elapsed = self
+            .ended_at
+            .duration_since(self.started_at)
+            .map_err(|_| TimerValidationError::EndBeforeStart)?;
+        if elapsed != self.actual_duration {
+            return Err(TimerValidationError::ElapsedDurationMismatch);
         }
         if self.actual_duration > self.allocated_duration {
             return Err(TimerValidationError::ActualDurationExceedsAllocated);
         }
         match (self.phase_type, self.outcome) {
-            (PhaseType::Green, PhaseOutcome::Completed)
-            | (PhaseType::Red, PhaseOutcome::CompletedEarly | PhaseOutcome::Expired) => {
+            (PhaseType::Green, PhaseOutcome::CompletedEarly) => {
+                if self.actual_duration < self.allocated_duration {
+                    Ok(())
+                } else {
+                    Err(TimerValidationError::CompletedEarlyNotActuallyEarly)
+                }
+            }
+            (PhaseType::Green, PhaseOutcome::Expired) => {
+                if self.actual_duration == self.allocated_duration {
+                    Ok(())
+                } else {
+                    Err(TimerValidationError::ExpiryDurationMismatch)
+                }
+            }
+            (PhaseType::Green, PhaseOutcome::Interrupted) => Ok(()),
+            (PhaseType::Green, PhaseOutcome::Completed) => {
                 Err(TimerValidationError::InvalidPhaseOutcome)
             }
-            _ => Ok(()),
+            (PhaseType::Red, PhaseOutcome::Completed) => {
+                if self.actual_duration == self.allocated_duration {
+                    Ok(())
+                } else {
+                    Err(TimerValidationError::CompletedDurationMismatch)
+                }
+            }
+            (PhaseType::Red, PhaseOutcome::Interrupted) => Ok(()),
+            (PhaseType::Red, PhaseOutcome::CompletedEarly | PhaseOutcome::Expired) => {
+                Err(TimerValidationError::InvalidPhaseOutcome)
+            }
         }
     }
 }
@@ -223,11 +254,112 @@ pub enum TimerValidationError {
     ActualDurationExceedsAllocated,
     #[error("invalid outcome for phase type")]
     InvalidPhaseOutcome,
+    #[error("completed-early Green phase must end before allocated duration")]
+    CompletedEarlyNotActuallyEarly,
+    #[error("expired phase must use its full allocated duration")]
+    ExpiryDurationMismatch,
+    #[error("completed phase must use its full allocated duration")]
+    CompletedDurationMismatch,
+    #[error("elapsed wall-clock duration must match actual duration")]
+    ElapsedDurationMismatch,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn assert_validation_error(
+        phase_type: PhaseType,
+        allocated: Duration,
+        actual: Duration,
+        outcome: PhaseOutcome,
+        expected: TimerValidationError,
+    ) {
+        let start = SystemTime::UNIX_EPOCH;
+        assert!(matches!(
+            CompletedPhase::new(phase_type, 1, start, start + actual, allocated, actual, outcome),
+            Err(err) if err == expected
+        ));
+    }
+
+    #[test]
+    fn green_completed_early_requires_actual_less_than_allocated() {
+        assert_validation_error(
+            PhaseType::Green,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            PhaseOutcome::CompletedEarly,
+            TimerValidationError::CompletedEarlyNotActuallyEarly,
+        );
+    }
+
+    #[test]
+    fn green_expired_requires_full_allocated_duration() {
+        assert_validation_error(
+            PhaseType::Green,
+            Duration::from_secs(5),
+            Duration::from_secs(4),
+            PhaseOutcome::Expired,
+            TimerValidationError::ExpiryDurationMismatch,
+        );
+    }
+
+    #[test]
+    fn red_completed_requires_full_allocated_duration() {
+        assert_validation_error(
+            PhaseType::Red,
+            Duration::from_secs(3),
+            Duration::from_secs(2),
+            PhaseOutcome::Completed,
+            TimerValidationError::CompletedDurationMismatch,
+        );
+    }
+
+    #[test]
+    fn elapsed_wall_duration_must_match_actual_duration() {
+        let start = SystemTime::UNIX_EPOCH;
+        assert!(matches!(
+            CompletedPhase::new(
+                PhaseType::Green,
+                1,
+                start,
+                start + Duration::from_secs(2),
+                Duration::from_secs(5),
+                Duration::from_secs(1),
+                PhaseOutcome::CompletedEarly,
+            ),
+            Err(TimerValidationError::ElapsedDurationMismatch)
+        ));
+    }
+
+    #[test]
+    fn zero_allocated_duration_is_rejected() {
+        assert_validation_error(
+            PhaseType::Green,
+            Duration::ZERO,
+            Duration::ZERO,
+            PhaseOutcome::Interrupted,
+            TimerValidationError::AllocatedDurationZero,
+        );
+    }
+
+    #[test]
+    fn invalid_phase_outcome_is_rejected() {
+        assert_validation_error(
+            PhaseType::Red,
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+            PhaseOutcome::Expired,
+            TimerValidationError::InvalidPhaseOutcome,
+        );
+        assert_validation_error(
+            PhaseType::Green,
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+            PhaseOutcome::Completed,
+            TimerValidationError::InvalidPhaseOutcome,
+        );
+    }
+
     #[test]
     fn definition_rejects_empty_name_and_zero_durations() {
         assert!(matches!(
