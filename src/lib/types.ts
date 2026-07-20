@@ -15,6 +15,7 @@ export interface TimerSnapshot {
 }
 
 export interface CompletedRunSummary {
+  run_id: string;
   green_completed_early: number;
   green_expired: number;
   red_completed: number;
